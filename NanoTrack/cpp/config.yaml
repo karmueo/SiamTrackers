@@ -1,0 +1,9 @@
+%YAML:1.0
+image_dir: "/home/tl/data/ss928/resource/images"
+output_dir: "/home/tl/data/ss928/images"
+backbone: "../models/onnx/nanotrack_backbone.onnx"
+search_backbone: "../models/onnx/nanotrack_backbone_search.onnx"
+head: "../models/onnx/nanotrack_head.onnx"
+use_cuda: 0
+init_roi: [938, 527, 43, 31]
+repeat: 10

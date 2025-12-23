@@ -44,8 +44,8 @@ def load_pretrain(model, pretrained_path):
     logger.info('load pretrained model from {}'.format(pretrained_path))
     
     device = torch.device('cuda' if torch.cuda.is_available()  else 'cpu')
-    pretrained_dict = torch.load(pretrained_path,
-        map_location=lambda storage, loc: storage)
+    pretrained_dict = torch.load(
+        pretrained_path, map_location=lambda storage, loc: storage, weights_only=False)
     
     #device = torch.cuda.current_device()
     # pretrained_dict = torch.load(pretrained_path,

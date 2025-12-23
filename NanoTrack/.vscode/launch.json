@@ -1,15 +1,84 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: 当前文件",
-            "type": "python",
+            "name": "Demo: run bin/demo.py (v3)",
+            "type": "debugpy",
             "request": "launch",
-            "program": "${file}",
-            "console": "integratedTerminal"
-        }
+            "program": "${workspaceFolder}/bin/demo.py",
+            "args": [
+                "--config",
+                "models/config/configv3.yaml",
+                "--snapshot",
+                "models/pretrained/nanotrackv3.pth",
+                "--video_name",
+                "/home/tl/data_80/data/video/110/RGB/2025-11-26-27-福州/bird/Smart_Record_00000_20251125-015317_283075.mp4",
+                // "--manual_roi"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "DISPLAY": "tl-Ai:10.0"
+            }
+        },
+        {
+            "name": "Demo: run bin/demo.py (v3 ONNX)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/bin/demo.py",
+            "args": [
+                "--use_onnx",
+                "--config",
+                "models/config/configv3.yaml",
+                "--onnx_backbone",
+                "models/onnx/nanotrack_backbone.onnx",
+                "--onnx_backbone_search",
+                "models/onnx/nanotrack_backbone_search.onnx",
+                "--onnx_head",
+                "models/onnx/nanotrack_head.onnx",
+                "--video_name",
+                "/home/tl/data_80/data/video/110/RGB/2025-11-26-27-福州/bird/Smart_Record_00000_20251125-015317_283075.mp4",
+                // "--manual_roi",
+                // "--onnx_provider", "cuda" // 如需强制 GPU Provider，请取消注释
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "DISPLAY": "tl-Ai:10.0"
+            }
+        },
+        {
+            "name": "Tool: export_onnx_eval",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/bin/export_onnx_eval.py",
+            "args": [
+                "--config",
+                "models/config/configv3.yaml",
+                "--static_shapes",
+                "--snapshot",
+                "models/pretrained/nanotrackv3.pth",
+                "--backbone_out",
+                "models/onnx/nanotrack_backbone.onnx",
+                "--head_out",
+                "models/onnx/nanotrack_head.onnx",
+                "--opset",
+                "12",
+                "--load_io",
+                "--io_dir",
+                "./models/onnx/io",
+                "--print_outputs"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
     ]
 }
