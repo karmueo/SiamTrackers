@@ -11,7 +11,18 @@ NanoTrack::NanoTrack(const std::string& backbone_path,
                      bool use_cuda)
     : env_(ORT_LOGGING_LEVEL_WARNING, "nanotrack"),
       memory_info_(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)) {
+    use_merge_ = false;
     init_sessions(backbone_path, head_path, search_backbone_path, use_cuda);
+
+    window_ = build_window(cfg_.score_size);
+    points_ = build_points(cfg_.stride, cfg_.score_size);
+}
+
+NanoTrack::NanoTrack(const std::string& merge_path, bool use_cuda)
+    : env_(ORT_LOGGING_LEVEL_WARNING, "nanotrack"),
+      memory_info_(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)) {
+    use_merge_ = true;
+    init_merge_session(merge_path, use_cuda);
 
     window_ = build_window(cfg_.score_size);
     points_ = build_points(cfg_.stride, cfg_.score_size);
@@ -77,6 +88,47 @@ void NanoTrack::init_sessions(const std::string& backbone_path,
     }
 }
 
+void NanoTrack::init_merge_session(const std::string& merge_path, bool use_cuda) {
+    Ort::SessionOptions session_options;
+    session_options.SetIntraOpNumThreads(1);
+#ifdef USE_CUDA_EP
+    if (use_cuda) {
+        OrtCUDAProviderOptions cuda_options{};
+        cuda_options.device_id = 0;
+        try {
+            session_options.AppendExecutionProvider_CUDA(cuda_options);
+            std::cout << "使用 CUDA Execution Provider\n";
+        } catch (const std::exception& e) {
+            std::cerr << "CUDA 不可用，回退 CPU: " << e.what() << "\n";
+        }
+    }
+#else
+    if (use_cuda) {
+        std::cerr << "本构建未开启 USE_CUDA_EP，默认使用 CPU\n";
+    }
+#endif
+
+    merge_sess_ = std::make_unique<Ort::Session>(env_, merge_path.c_str(), session_options);
+
+    Ort::AllocatorWithDefaultOptions allocator;
+    merge_input_z_name_ = merge_sess_->GetInputNameAllocated(0, allocator).get();
+    merge_input_x_name_ = merge_sess_->GetInputNameAllocated(1, allocator).get();
+    merge_output_names_.push_back(merge_sess_->GetOutputNameAllocated(0, allocator).get());
+    merge_output_names_.push_back(merge_sess_->GetOutputNameAllocated(1, allocator).get());
+
+    // 获取输入形状
+    auto z_shape = merge_sess_->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+    auto x_shape = merge_sess_->GetInputTypeInfo(1).GetTensorTypeAndShapeInfo().GetShape();
+
+    merge_input_z_hw_ = {z_shape.size() >= 4 && z_shape[2] > 0 ? static_cast<int>(z_shape[2]) : -1,
+                         z_shape.size() >= 4 && z_shape[3] > 0 ? static_cast<int>(z_shape[3]) : -1};
+    merge_input_x_hw_ = {x_shape.size() >= 4 && x_shape[2] > 0 ? static_cast<int>(x_shape[2]) : -1,
+                         x_shape.size() >= 4 && x_shape[3] > 0 ? static_cast<int>(x_shape[3]) : -1};
+
+    std::cout << "合并模型输入: template=" << merge_input_z_hw_.first << "x" << merge_input_z_hw_.second
+              << ", search=" << merge_input_x_hw_.first << "x" << merge_input_x_hw_.second << "\n";
+}
+
 void NanoTrack::init(const cv::Rect& roi, const cv::Mat& image) {
     cv::Rect2f bbox(static_cast<float>(roi.x),
                     static_cast<float>(roi.y),
@@ -89,13 +141,26 @@ void NanoTrack::init(const cv::Rect& roi, const cv::Mat& image) {
     float h_z = size_.y + cfg_.context_amount * (size_.x + size_.y);
     float s_z = std::sqrt(w_z * h_z);
     channel_average_ = cv::mean(image);
-    auto z = get_subwindow(image, center_pos_, cfg_.exemplar_size, static_cast<int>(std::round(s_z)), channel_average_);
-    if (template_input_hw_.first > 0 && template_input_hw_.first != cfg_.exemplar_size) {
-        throw std::runtime_error("模板输入尺寸与模型静态尺寸不符，模型期待 " +
-                                 std::to_string(template_input_hw_.first) + ", 请导出对应尺寸的 backbone 或使用动态/dual backbone。");
+
+    if (use_merge_) {
+        // 合并模式：直接保存模板图像，后续在 update 中一起推理
+        if (merge_input_z_hw_.first > 0 && merge_input_z_hw_.first != cfg_.exemplar_size) {
+            throw std::runtime_error("合并模型模板输入尺寸与模型静态尺寸不符，模型期待 " +
+                                     std::to_string(merge_input_z_hw_.first) + ", 请导出对应尺寸的模型。");
+        }
+        zf_ = get_subwindow(image, center_pos_, cfg_.exemplar_size, static_cast<int>(std::round(s_z)), channel_average_);
+        // 保存模板的 shape
+        zf_shape_ = subwindow_shape_;
+    } else {
+        // 分离模式：分别运行 backbone 和 head
+        auto z = get_subwindow(image, center_pos_, cfg_.exemplar_size, static_cast<int>(std::round(s_z)), channel_average_);
+        if (template_input_hw_.first > 0 && template_input_hw_.first != cfg_.exemplar_size) {
+            throw std::runtime_error("模板输入尺寸与模型静态尺寸不符，模型期待 " +
+                                     std::to_string(template_input_hw_.first) + ", 请导出对应尺寸的 backbone 或使用动态/dual backbone。");
+        }
+        zf_ = run_backbone(z, subwindow_shape_, zf_shape_);
+        zf_ = align_feature(zf_, zf_shape_, head_template_hw_, zf_shape_);
     }
-    zf_ = run_backbone(z, subwindow_shape_, zf_shape_);
-    zf_ = align_feature(zf_, zf_shape_, head_template_hw_, zf_shape_);
     last_score_ = 1.0f;
 }
 
@@ -106,19 +171,35 @@ cv::Rect NanoTrack::update(const cv::Mat& image) {
     float scale_z = cfg_.exemplar_size / s_z;
     float s_x = s_z * (static_cast<float>(cfg_.instance_size) / cfg_.exemplar_size);
     auto x = get_subwindow(image, center_pos_, cfg_.instance_size, static_cast<int>(std::round(s_x)), channel_average_);
-    if (search_input_hw_.first > 0 && search_input_hw_.first != cfg_.instance_size) {
-        throw std::runtime_error("搜索输入尺寸与模型静态尺寸不符，模型期待 " +
-                                 std::to_string(search_input_hw_.first) + "，请提供 search_backbone 或导出动态输入。");
-    }
-    std::vector<int64_t> xf_shape;
-    auto xf = run_search_backbone(x, subwindow_shape_, xf_shape);
-    xf = align_feature(xf, xf_shape, head_search_hw_, xf_shape);
 
+    std::vector<float> cls;
+    std::vector<float> loc;
     std::vector<int64_t> cls_shape;
     std::vector<int64_t> loc_shape;
-    auto head_outputs = run_head(zf_, zf_shape_, xf, xf_shape, cls_shape, loc_shape);
-    auto& cls = head_outputs.first;
-    auto& loc = head_outputs.second;
+
+    if (use_merge_) {
+        // 合并模式：一次推理完成 backbone + head
+        if (merge_input_x_hw_.first > 0 && merge_input_x_hw_.first != cfg_.instance_size) {
+            throw std::runtime_error("合并模型搜索输入尺寸与模型静态尺寸不符，模型期待 " +
+                                     std::to_string(merge_input_x_hw_.first) + ", 请导出对应尺寸的模型。");
+        }
+        auto outputs = run_merge(zf_, zf_shape_, x, subwindow_shape_, cls_shape, loc_shape);
+        cls = std::move(outputs.first);
+        loc = std::move(outputs.second);
+    } else {
+        // 分离模式：分别运行 backbone 和 head
+        if (search_input_hw_.first > 0 && search_input_hw_.first != cfg_.instance_size) {
+            throw std::runtime_error("搜索输入尺寸与模型静态尺寸不符，模型期待 " +
+                                     std::to_string(search_input_hw_.first) + "，请提供 search_backbone 或导出动态输入。");
+        }
+        std::vector<int64_t> xf_shape;
+        auto xf = run_search_backbone(x, subwindow_shape_, xf_shape);
+        xf = align_feature(xf, xf_shape, head_search_hw_, xf_shape);
+
+        auto head_outputs = run_head(zf_, zf_shape_, xf, xf_shape, cls_shape, loc_shape);
+        cls = std::move(head_outputs.first);
+        loc = std::move(head_outputs.second);
+    }
 
     auto score = convert_score(cls, cls_shape);
     auto pred_bbox = convert_bbox(loc, loc_shape);
@@ -208,6 +289,25 @@ std::pair<std::vector<float>, std::vector<float>> NanoTrack::run_head(const std:
     auto outputs = head_sess_->Run(Ort::RunOptions{nullptr},
                                    head_input_names, head_inputs.data(), head_inputs.size(),
                                    head_output_names, 2);
+    auto cls = tensor_to_vector(outputs[0], cls_shape);
+    auto loc = tensor_to_vector(outputs[1], loc_shape);
+    return {std::move(cls), std::move(loc)};
+}
+
+std::pair<std::vector<float>, std::vector<float>> NanoTrack::run_merge(const std::vector<float>& z,
+                                                                       const std::vector<int64_t>& z_shape,
+                                                                       const std::vector<float>& x,
+                                                                       const std::vector<int64_t>& x_shape,
+                                                                       std::vector<int64_t>& cls_shape,
+                                                                       std::vector<int64_t>& loc_shape) {
+    const char* merge_input_names[] = {merge_input_z_name_.c_str(), merge_input_x_name_.c_str()};
+    const char* merge_output_names[] = {merge_output_names_[0].c_str(), merge_output_names_[1].c_str()};
+    std::array<Ort::Value, 2> merge_inputs{
+        tensor_from_buffer(z, z_shape),
+        tensor_from_buffer(x, x_shape)};
+    auto outputs = merge_sess_->Run(Ort::RunOptions{nullptr},
+                                    merge_input_names, merge_inputs.data(), merge_inputs.size(),
+                                    merge_output_names, 2);
     auto cls = tensor_to_vector(outputs[0], cls_shape);
     auto loc = tensor_to_vector(outputs[1], loc_shape);
     return {std::move(cls), std::move(loc)};

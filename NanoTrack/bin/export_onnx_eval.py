@@ -9,6 +9,7 @@ import sys
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 sys.path.append(os.getcwd())
 
@@ -19,10 +20,26 @@ from nanotrack.utils.model_load import load_pretrain
 torch.set_num_threads(1)
 
 
+class MergeModel(nn.Module):
+    """合并 backbone 和 head 为单个模型"""
+    def __init__(self, backbone, head):
+        super(MergeModel, self).__init__()
+        self.backbone = backbone
+        self.head = head
+
+    def forward(self, z, x):
+        zf = self.backbone(z)
+        xf = self.backbone(x)
+        cls, loc = self.head(zf, xf)
+        return cls, loc
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Export NanoTrack v3 to ONNX and eval diff')
     parser.add_argument('--config', type=str, default='./models/config/configv3.yaml', help='config file')
     parser.add_argument('--snapshot', type=str, default='./models/pretrained/nanotrackv3.pth', help='pytorch checkpoint')
+    parser.add_argument('--merge', action='store_true', help='export merged backbone+head as single onnx file')
+    parser.add_argument('--merge_out', type=str, default='./models/onnx/nanotrack_merge.onnx', help='onnx path for merged model')
     parser.add_argument('--backbone_out', type=str, default='./models/onnx/nanotrack_backbone.onnx', help='onnx path for backbone')
     parser.add_argument('--backbone_search_out', type=str, default='./models/onnx/nanotrack_backbone_search.onnx', help='onnx path for backbone (search branch, static shapes)')
     parser.add_argument('--head_out', type=str, default='./models/onnx/nanotrack_head.onnx', help='onnx path for head')
@@ -70,6 +87,33 @@ def export_head(model, z_feat, x_feat, out_path, opset, static_shapes=False, ver
                       opset_version=opset)
     if verbose:
         print('Head ONNX saved to {}'.format(out_path))
+
+
+def export_merge(model, exemplar_size, instance_size, out_path, opset, static_shapes=False, verbose=True):
+    """导出合并的 backbone+head 模型"""
+    ensure_dir(out_path)
+    merge_model = MergeModel(model.backbone, model.ban_head)
+
+    z = torch.randn(1, 3, exemplar_size, exemplar_size)
+    x = torch.randn(1, 3, instance_size, instance_size)
+
+    if static_shapes:
+        dynamic_axes = None
+    else:
+        dynamic_axes = {
+            'template': {0: 'batch', 2: 'h', 3: 'w'},
+            'search': {0: 'batch', 2: 'h', 3: 'w'},
+            'cls': {0: 'batch', 2: 'h', 3: 'w'},
+            'loc': {0: 'batch', 2: 'h', 3: 'w'}
+        }
+
+    torch.onnx.export(merge_model, (z, x), out_path,
+                      input_names=['template', 'search'],
+                      output_names=['cls', 'loc'],
+                      dynamic_axes=dynamic_axes,
+                      opset_version=opset)
+    if verbose:
+        print('Merged ONNX saved to {}'.format(out_path))
 
 
 def run_ort(path, inputs):
@@ -138,55 +182,92 @@ def main():
             if not args.print_outputs:
                 print('已保存 z/x 到 {}'.format(args.io_dir))
 
-        # PyTorch 特征（用于与 ORT diff 对比）
+        # PyTorch 原始输出（用于与 ORT diff 对比）
         z_feat = model.backbone(z)
         x_feat = model.backbone(x)
+        cls_torch, loc_torch = model.ban_head(z_feat, x_feat)
 
-    # backbone export: if静态且模板/搜索尺寸不同，导出两份
-    if args.static_shapes and exemplar_size != instance_size:
-        export_backbone(model, exemplar_size, args.backbone_out, args.opset, static_shapes=True, verbose=not args.print_outputs)
-        export_backbone(model, instance_size, args.backbone_search_out, args.opset, static_shapes=True, verbose=not args.print_outputs)
-        backbone_search_path = args.backbone_search_out
+    if args.merge:
+        # 导出合并模型
+        export_merge(model, exemplar_size, instance_size, args.merge_out,
+                     args.opset, static_shapes=args.static_shapes,
+                     verbose=not args.print_outputs)
+
+        # ORT inference for merged model
+        z_np = z.numpy()
+        x_np = x.numpy()
+        cls_ort, loc_ort = run_ort(args.merge_out, [z_np, x_np])
+
+        cls_mean, cls_max = diff_metric(cls_torch.detach().numpy(), cls_ort)
+        loc_mean, loc_max = diff_metric(loc_torch.detach().numpy(), loc_ort)
+
+        if args.print_outputs:
+            print_sample('cls_torch', cls_torch.detach().numpy())
+            print_sample('loc_torch', loc_torch.detach().numpy())
+            print_sample('cls_ort', cls_ort)
+            print_sample('loc_ort', loc_ort)
+            print('Merged model cls diff mean {:.6f}, max {:.6f}'.format(cls_mean, cls_max))
+            print('Merged model loc diff mean {:.6f}, max {:.6f}'.format(loc_mean, loc_max))
+        else:
+            print('Merged model cls diff mean {:.6f}, max {:.6f}'.format(cls_mean, cls_max))
+            print('Merged model loc diff mean {:.6f}, max {:.6f}'.format(loc_mean, loc_max))
+
+        # 检查差异是否在合理范围内
+        tol = 1e-4
+        if cls_max < tol and loc_max < tol:
+            print('Verification: PASSED (max diff < {})'.format(tol))
+        else:
+            print('Verification: FAILED (max diff >= {})'.format(tol))
     else:
-        export_backbone(model, exemplar_size, args.backbone_out, args.opset, static_shapes=args.static_shapes, verbose=not args.print_outputs)
-        backbone_search_path = args.backbone_out
+        # 导出分离模型
+        if args.static_shapes and exemplar_size != instance_size:
+            export_backbone(model, exemplar_size, args.backbone_out, args.opset,
+                           static_shapes=True, verbose=not args.print_outputs)
+            export_backbone(model, instance_size, args.backbone_search_out, args.opset,
+                           static_shapes=True, verbose=not args.print_outputs)
+            backbone_search_path = args.backbone_search_out
+        else:
+            export_backbone(model, exemplar_size, args.backbone_out, args.opset,
+                           static_shapes=args.static_shapes, verbose=not args.print_outputs)
+            backbone_search_path = args.backbone_out
 
-    export_head(model, z_feat, x_feat, args.head_out, args.opset, static_shapes=args.static_shapes, verbose=not args.print_outputs)
+        export_head(model, z_feat, x_feat, args.head_out, args.opset,
+                   static_shapes=args.static_shapes, verbose=not args.print_outputs)
 
-    # ORT inference
-    z_np = z.numpy()
-    x_np = x.numpy()
-    z_feat_torch = z_feat.detach().numpy()
-    x_feat_torch = x_feat.detach().numpy()
+        # ORT inference for separate models
+        z_np = z.numpy()
+        x_np = x.numpy()
+        z_feat_torch = z_feat.detach().numpy()
+        x_feat_torch = x_feat.detach().numpy()
 
-    # 计算 ORT 的 backbone 输出，作为 head 的输入（不再保存/读取中间特征）
-    z_feat_ort = run_ort(args.backbone_out, [z_np])[0]
-    x_feat_ort = run_ort(backbone_search_path, [x_np])[0]
+        z_feat_ort = run_ort(args.backbone_out, [z_np])[0]
+        x_feat_ort = run_ort(backbone_search_path, [x_np])[0]
 
-    cls_torch, loc_torch = model.ban_head(torch.from_numpy(z_feat_torch),
-                                          torch.from_numpy(x_feat_torch))
-    cls_ort, loc_ort = run_ort(args.head_out, [z_feat_ort, x_feat_ort])
+        cls_ort, loc_ort = run_ort(args.head_out, [z_feat_ort, x_feat_ort])
 
-    if args.print_outputs:
-        print_sample('z_feat_torch', z_feat_torch)
-        print_sample('x_feat_torch', x_feat_torch)
-        print_sample('z_feat_ort', z_feat_ort)
-        print_sample('x_feat_ort', x_feat_ort)
-        print_sample('cls_torch', cls_torch.detach().numpy())
-        print_sample('loc_torch', loc_torch.detach().numpy())
-        print_sample('cls_ort', cls_ort)
-        print_sample('loc_ort', loc_ort)
-
-    if not args.print_outputs:
         backbone_z_mean, backbone_z_max = diff_metric(z_feat_torch, z_feat_ort)
         backbone_x_mean, backbone_x_max = diff_metric(x_feat_torch, x_feat_ort)
         cls_mean, cls_max = diff_metric(cls_torch.detach().numpy(), cls_ort)
         loc_mean, loc_max = diff_metric(loc_torch.detach().numpy(), loc_ort)
 
-        print('Backbone (template) diff mean {:.6f}, max {:.6f}'.format(backbone_z_mean, backbone_z_max))
-        print('Backbone (search)   diff mean {:.6f}, max {:.6f}'.format(backbone_x_mean, backbone_x_max))
-        print('Head cls diff       mean {:.6f}, max {:.6f}'.format(cls_mean, cls_max))
-        print('Head loc diff       mean {:.6f}, max {:.6f}'.format(loc_mean, loc_max))
+        if args.print_outputs:
+            print_sample('z_feat_torch', z_feat_torch)
+            print_sample('x_feat_torch', x_feat_torch)
+            print_sample('z_feat_ort', z_feat_ort)
+            print_sample('x_feat_ort', x_feat_ort)
+            print_sample('cls_torch', cls_torch.detach().numpy())
+            print_sample('loc_torch', loc_torch.detach().numpy())
+            print_sample('cls_ort', cls_ort)
+            print_sample('loc_ort', loc_ort)
+            print('Backbone (template) diff mean {:.6f}, max {:.6f}'.format(backbone_z_mean, backbone_z_max))
+            print('Backbone (search)   diff mean {:.6f}, max {:.6f}'.format(backbone_x_mean, backbone_x_max))
+            print('Head cls diff       mean {:.6f}, max {:.6f}'.format(cls_mean, cls_max))
+            print('Head loc diff       mean {:.6f}, max {:.6f}'.format(loc_mean, loc_max))
+        else:
+            print('Backbone (template) diff mean {:.6f}, max {:.6f}'.format(backbone_z_mean, backbone_z_max))
+            print('Backbone (search)   diff mean {:.6f}, max {:.6f}'.format(backbone_x_mean, backbone_x_max))
+            print('Head cls diff       mean {:.6f}, max {:.6f}'.format(cls_mean, cls_max))
+            print('Head loc diff       mean {:.6f}, max {:.6f}'.format(loc_mean, loc_max))
 
 
 if __name__ == '__main__':

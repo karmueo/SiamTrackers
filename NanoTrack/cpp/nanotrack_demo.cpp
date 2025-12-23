@@ -18,6 +18,8 @@ struct Args {
 struct DemoConfig {
     std::string image_dir;
     std::string output_dir;
+    bool use_merge = false;
+    std::string merge_model;
     std::string backbone = "../models/onnx/nanotrack_backbone.onnx";
     std::string search_backbone;
     std::string head = "../models/onnx/nanotrack_head.onnx";
@@ -46,9 +48,18 @@ bool load_config(const std::string& path, DemoConfig& cfg) {
     }
     fs["image_dir"] >> cfg.image_dir;
     fs["output_dir"] >> cfg.output_dir;
+
+    // 合并模型配置
+    int use_merge = 0;
+    fs["use_merge"] >> use_merge;
+    cfg.use_merge = use_merge != 0;
+    fs["merge_model"] >> cfg.merge_model;
+
+    // 分离模型配置
     fs["backbone"] >> cfg.backbone;
     fs["search_backbone"] >> cfg.search_backbone;
     fs["head"] >> cfg.head;
+
     int use_cuda = 0;
     fs["use_cuda"] >> use_cuda;
     cfg.use_cuda = use_cuda != 0;
@@ -149,14 +160,29 @@ int main(int argc, char** argv) {
     }
 
     try {
-        NanoTrack tracker(cfg.backbone, cfg.head, cfg.search_backbone, cfg.use_cuda);
+        std::unique_ptr<NanoTrack> tracker;
+        if (cfg.use_merge) {
+            std::cout << "使用合并模型: " << cfg.merge_model << "\n";
+            if (cfg.merge_model.empty()) {
+                std::cerr << "错误: use_merge 为 true 但 merge_model 为空\n";
+                return 1;
+            }
+            tracker = std::make_unique<NanoTrack>(cfg.merge_model, cfg.use_cuda);
+        } else {
+            std::cout << "使用分离模型: backbone=" << cfg.backbone << ", head=" << cfg.head << "\n";
+            if (cfg.backbone.empty() || cfg.head.empty()) {
+                std::cerr << "错误: backbone 或 head 路径为空\n";
+                return 1;
+            }
+            tracker = std::make_unique<NanoTrack>(cfg.backbone, cfg.head, cfg.search_backbone, cfg.use_cuda);
+        }
 
         cv::Mat first_frame = cv::imread(image_paths.front(), cv::IMREAD_COLOR);
         if (first_frame.empty()) {
             std::cerr << "读取首张图片失败: " << image_paths.front() << "\n";
             return 1;
         }
-        tracker.init(cv::Rect(cfg.init_roi), first_frame);
+        tracker->init(cv::Rect(cfg.init_roi), first_frame);
 
         int total_frames = static_cast<int>(image_paths.size());
         if (image_paths.size() == 1) {
@@ -178,8 +204,8 @@ int main(int argc, char** argv) {
             if (frame_idx == 0) {
                 bbox = cv::Rect(cfg.init_roi);
             } else {
-                bbox = tracker.update(frame);
-                score = tracker.last_score();
+                bbox = tracker->update(frame);
+                score = tracker->last_score();
             }
             cv::rectangle(frame, bbox, cv::Scalar(0, 255, 0), 2);
             cv::putText(frame, cv::format("score: %.3f", score),
