@@ -83,5 +83,43 @@
                 "PYTHONPATH": "${workspaceFolder}"
             }
         },
+        {
+            "name": "视频识别预处理",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/bin/track_videos.py",
+            "args": [
+                "--video-root",
+                "/home/tl/data_80/data/video/110/RGB/tmp",
+                "--output-root",
+                "/home/tl/data_80/data/video/110/RGB/tmp_out",
+                "--use-yolo",
+                "--yolo-weights",
+                "/home/tl/work/ultralytics/runs/detect/yolov11m_110_rgb_640_v10/weights/best.pt",
+                "--yolo-conf",
+                "0.5",
+                "--track-conf",
+                "0.8",
+                "--roi-size",
+                "64",
+                "--frames-per-folder",
+                "200",
+                // "--show",
+                "--show-fps",
+                "--write-batch-size",
+                "50",
+                "--write-queue-size",
+                "512",
+                "--num-workers",
+                "4"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "DISPLAY": "tl-Ai:10.0",
+                "CUDA_VISIBLE_DEVICES": "0,1,2,3"
+            }
+        },
     ]
 }
