@@ -109,8 +109,8 @@ def writer_loop(write_queue):
         batch = write_queue.get()
         if batch is None:
             break
-    for path, img in batch:
-        cv2.imwrite(path, img)
+        for path, img in batch:
+            cv2.imwrite(path, img)
 
 
 def select_yolo_init(yolo, frame, conf_thres):
