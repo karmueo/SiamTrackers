@@ -90,16 +90,16 @@
             "program": "${workspaceFolder}/bin/track_videos.py",
             "args": [
                 "--video-root",
-                "/home/tl/data_80/data/video/110/RGB/tmp",
+                "/home/tl/data_80/data/video/110/RGB/2026_717/bird",
                 "--output-root",
-                "/home/tl/data_80/data/video/110/RGB/tmp_out",
+                "/home/tl/data/datasets/mmaction2/110_video_frames_2026_717_200_have_json_nanotrack",
                 "--use-yolo",
                 "--yolo-weights",
                 "/home/tl/work/ultralytics/runs/detect/yolov11m_110_rgb_640_v10/weights/best.pt",
                 "--yolo-conf",
                 "0.5",
                 "--track-conf",
-                "0.8",
+                "0.9",
                 "--roi-size",
                 "64",
                 "--frames-per-folder",
@@ -119,6 +119,64 @@
                 "PYTHONPATH": "${workspaceFolder}",
                 "DISPLAY": "tl-Ai:10.0",
                 "CUDA_VISIBLE_DEVICES": "0,1,2,3"
+            }
+        },
+        {
+            "name": "交互式单视频跟踪",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/bin/track_video_interactive.py",
+            "args": [
+                "--config",
+                "models/config/configv3.yaml",
+                "--snapshot",
+                "models/pretrained/nanotrackv3.pth",
+                "--video",
+                "/home/tl/data_80/data/video/tmp/1.mp4",
+                "--output-dir",
+                "${workspaceFolder}/results/interactive_track",
+                "--track-conf",
+                "0.8",
+                "--low-conf-action",
+                "pause",
+                "--max-cache",
+                "300"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "DISPLAY": "tl-Ai:10.0"
+            }
+        },
+        {
+            "name": "YOLO标注生成器",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/bin/track_yolo_labeler.py",
+            "args": [
+                "--config", "models/config/configv3.yaml",              // 配置文件路径
+                "--snapshot", "models/pretrained/nanotrackv3.pth",       // 模型权重文件路径
+                "--input", "/home/tl/data_80/data/video/110/RGB/2025-11-all/uav",           // 输入视频文件或文件夹路径
+                "--output-dir", "./results/yolo_labels",                 // YOLO数据集输出目录
+                "--track-conf", "0.92",                                    // 跟踪置信度阈值(0-1)，低于此值将暂停提示重新框选
+                "--label-interval", "8.0",                               // 标注生成间隔(秒)，每隔多少秒保存一次标注
+                "--max-cache", "300",                                    // 最大缓存帧数，用于左方向键回退历史帧
+                "--yolo-model", "/home/tl/work/yolo/ultralytics/runs/detect/yolo26s_110_rgb_v2/weights/best.pt",  // YOLO模型路径 (如: yolov8n.pt)，留空则禁用检测
+                "--yolo-conf", "0.25",                                   // YOLO检测置信度阈值
+                "--yolo-iou", "0.5",                                    // 检测框与跟踪框IOU阈值，低于此值认为跟踪失败
+                "--yolo-imgsz", "640x352",                              // YOLO推理输入尺寸 (如: 640 或 640x352)
+                "--yolo-skip-frames", "1",                               // 每隔多少帧进行一次YOLO检测 (1=每帧, 值越大性能越好)
+                "--auto-detect",                                        // 启用自动检测模式 (第一帧自动检测目标)
+                "--use-first-class",                                    // 使用首个类别模式 (第一个视频首次选择类别后，后续所有视频自动使用该类别)
+                "--headless",                                           // 无显示模式 (只在需要用户交互时显示画面，其他时候只打印进度以提高速度)
+                "--label-seq-len", "3"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "DISPLAY": "tl-Ai:10.0"
             }
         },
     ]

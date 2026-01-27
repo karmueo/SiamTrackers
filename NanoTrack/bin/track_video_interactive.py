@@ -180,7 +180,9 @@ def main():
         cap.release()
         return
 
-    window_name = os.path.basename(video_path)  # 窗口名称
+    # 使用安全的窗口名称（避免中文导致cv2.selectROI问题）
+    video_basename = os.path.basename(video_path)
+    window_name = f"Tracker_{hash(video_basename) & 0x7fffffff}"  # 正整数哈希作为窗口名
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
     frame_cache = [first_frame]  # 帧缓存
