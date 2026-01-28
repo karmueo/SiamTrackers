@@ -35,6 +35,14 @@ except ImportError:
     YOLO_AVAILABLE = False
     YOLO = None
 
+# 尝试导入tqdm（可选依赖，用于总体进度条）
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    tqdm = None
+    TQDM_AVAILABLE = False
+
 
 # 常量定义
 ARROW_LEFT_KEYS = (81, 2424832)  # 左方向键键值
@@ -332,6 +340,28 @@ def select_class_from_console_once(video_name):
     return None
 
 
+def render_overall_progress(processed, total, bar_width=30):
+    """渲染总体进度条文本（单行动态刷新）。
+
+    Args:
+        processed (int): 已处理的视频数量。
+        total (int): 视频总数量。
+        bar_width (int): 进度条宽度（字符数）。
+
+    Returns:
+        str: 以\r开头的单行进度条文本。
+    """
+    if total <= 0:
+        return '\r总体进度 [----------] 0/0 (0.0%)'
+
+    ratio = processed / total  # 当前进度比例
+    ratio = max(0.0, min(1.0, ratio))  # 进度比例（限制在0-1）
+    filled = int(ratio * bar_width)  # 进度条已填充长度
+    bar = '=' * filled + '-' * (bar_width - filled)  # 进度条文本
+    percent = ratio * 100  # 进度百分比
+    return f'\r总体进度 [{bar}] {processed}/{total} ({percent:.1f}%)'
+
+
 def get_video_files(input_path):
     """获取输入路径下的所有视频文件。
 
@@ -498,7 +528,9 @@ def process_single_video(video_path, tracker, yolo_model, args, is_first_video=F
     if yolo_imgsz is not None:
         print(f'  YOLO推理尺寸: {yolo_imgsz}')
 
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    ui_enabled = not headless  # 是否启用OpenCV窗口交互
+    if ui_enabled:
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
     # 状态变量
     frame_cache = [first_frame]
@@ -508,7 +540,7 @@ def process_single_video(video_path, tracker, yolo_model, args, is_first_video=F
     last_processed_idx = -1
     tracking_active = False
     playing = False
-    headless_ui_enabled = headless  # headless模式下仅首帧允许一次窗口交互
+    headless_ui_enabled = False  # headless模式下禁用窗口交互
     waiting_for_single_target = False  # 等待单目标标志
     skip_frame_save = False  # 跳过当前帧保存标志
     last_multi_target_print_idx = -1  # 上次打印多目标的帧索引
@@ -548,101 +580,115 @@ def process_single_video(video_path, tracker, yolo_model, args, is_first_video=F
             print(f'检测到目标 (置信度: {conf:.3f})')
             print(f'边界框: x={bbox[0]}, y={bbox[1]}, w={bbox[2]}, h={bbox[3]}')
 
-            # 在画面上绘制检测框
-            display_frame = first_frame.copy()
-            x, y, w, h = bbox
-            cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            cv2.rectangle(display_frame, (x, y), (x + w, y + h), (255, 255, 255), 1)
-
-            # 显示类别选择提示
-            help_text = [
-                'Detected target! Select class:',
-                '0: Bird    1: Drone    2: Night-Drone',
-                '3: Aircraft  4: Balloon',
-                'Press 0-4 | R=Redraw | N=Skip Video | ESC=Cancel'
-            ]
-            for i, text in enumerate(help_text):
-                cv2.putText(display_frame, text, (10, 25 + i * 25),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-
-            cv2.imshow(window_name, display_frame)
-            cv2.waitKey(1)
-
-            # 命令行提示用户选择类别
-            print('\n' + '='*50)
-            print('检测到目标！请选择类别:')
-            print('  0: Bird        (鸟)')
-            print('  1: Drone       (无人机)')
-            print('  2: Night-Drone (夜间无人机)')
-            print('  3: Aircraft    (飞机)')
-            print('  4: Balloon     (气球)')
-            print('='*50)
-            print('操作: 按 0-4 选择类别 | R 手动框选 | N 跳过视频 | ESC 取消')
-            sys.stdout.flush()
-
-            # 等待用户按键选择类别
             class_id = None
-            if class_locked and current_class_id is not None:
-                # 使用锁定的类别
-                class_id = current_class_id
-                print(f'使用锁定类别: {CLASS_NAMES_CN[class_id]} ({CLASS_NAMES[class_id]})')
-                print('按 空格 开始跟踪，按 R 重新框选，按 ESC 取消')
-                sys.stdout.flush()
-                # 等待用户确认或重新框选
-                wait_for_input = True
-            else:
-                wait_for_input = True
-
-            while wait_for_input:
-                key = cv2.waitKey(0) & 0xFF
-                if key == 27:  # ESC - 取消
-                    wait_for_input = False
-                elif key in (ord('n'), ord('N')):  # N - 跳过当前视频
-                    print(f'\n跳过当前视频: {video_name}\n')
+            if headless:
+                # headless模式：不弹窗，直接命令行选择类别或使用锁定类别
+                if class_locked and current_class_id is not None:
+                    class_id = current_class_id
+                    print(f'headless模式：使用锁定类别: {CLASS_NAMES_CN[class_id]} ({CLASS_NAMES[class_id]})')
+                else:
+                    print('headless模式：需要从命令行选择类别（无法手动框选）')
+                    class_id = select_class_from_console()
+                if class_id is None:
+                    print(f'headless模式：未选择类别，跳过当前视频: {video_name}\n')
                     cap.release()
-                    cv2.destroyAllWindows()
-                    return (0, class_locked, current_class_id)  # 直接返回，处理下一个视频
-                elif key == ord(' '):  # 空格 - 确认并开始跟踪
-                    if class_id is not None:
-                        wait_for_input = False
-                elif key in (ord('r'), ord('R')):  # R - 手动框选
-                    wait_for_input = False
-                    cv2.destroyWindow(window_name)
-                    cv2.waitKey(1)
-                    roi = cv2.selectROI(window_name, first_frame, False, False)
-                    cv2.destroyWindow(window_name)
-                    cv2.waitKey(1)
-                    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-
-                    init_rect = [int(roi[0]), int(roi[1]), int(roi[2]), int(roi[3])]
-                    if init_rect[2] > 0 and init_rect[3] > 0:
-                        init_rect = clamp_bbox(init_rect, first_frame.shape)
-                        # 销毁窗口以便在终端进行输入
+                    if ui_enabled:
                         cv2.destroyAllWindows()
+                    return (0, class_locked, current_class_id)
+            else:
+                # 在画面上绘制检测框
+                display_frame = first_frame.copy()
+                x, y, w, h = bbox
+                cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.rectangle(display_frame, (x, y), (x + w, y + h), (255, 255, 255), 1)
+
+                # 显示类别选择提示
+                help_text = [
+                    'Detected target! Select class:',
+                    '0: Bird    1: Drone    2: Night-Drone',
+                    '3: Aircraft  4: Balloon',
+                    'Press 0-4 | R=Redraw | N=Skip Video | ESC=Cancel'
+                ]
+                for i, text in enumerate(help_text):
+                    cv2.putText(display_frame, text, (10, 25 + i * 25),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+                cv2.imshow(window_name, display_frame)
+                cv2.waitKey(1)
+
+                # 命令行提示用户选择类别
+                print('\n' + '='*50)
+                print('检测到目标！请选择类别:')
+                print('  0: Bird        (鸟)')
+                print('  1: Drone       (无人机)')
+                print('  2: Night-Drone (夜间无人机)')
+                print('  3: Aircraft    (飞机)')
+                print('  4: Balloon     (气球)')
+                print('='*50)
+                print('操作: 按 0-4 选择类别 | R 手动框选 | N 跳过视频 | ESC 取消')
+                sys.stdout.flush()
+
+                # 等待用户按键选择类别
+                if class_locked and current_class_id is not None:
+                    # 使用锁定的类别
+                    class_id = current_class_id
+                    print(f'使用锁定类别: {CLASS_NAMES_CN[class_id]} ({CLASS_NAMES[class_id]})')
+                    print('按 空格 开始跟踪，按 R 重新框选，按 ESC 取消')
+                    sys.stdout.flush()
+                    wait_for_input = True  # 等待输入标志
+                else:
+                    wait_for_input = True  # 等待输入标志
+
+                while wait_for_input:
+                    key = cv2.waitKey(0) & 0xFF
+                    if key == 27:  # ESC - 取消
+                        wait_for_input = False
+                    elif key in (ord('n'), ord('N')):  # N - 跳过当前视频
+                        print(f'\n跳过当前视频: {video_name}\n')
+                        cap.release()
+                        cv2.destroyAllWindows()
+                        return (0, class_locked, current_class_id)  # 直接返回，处理下一个视频
+                    elif key == ord(' '):  # 空格 - 确认并开始跟踪
+                        if class_id is not None:
+                            wait_for_input = False
+                    elif key in (ord('r'), ord('R')):  # R - 手动框选
+                        wait_for_input = False
+                        cv2.destroyWindow(window_name)
                         cv2.waitKey(1)
-                        class_id = select_class_from_console()
+                        roi = cv2.selectROI(window_name, first_frame, False, False)
+                        cv2.destroyWindow(window_name)
+                        cv2.waitKey(1)
                         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
-                    if class_id is not None:
-                        tracker.init(first_frame, init_rect)
-                        tracking_active = True
-                        current_class_id = class_id
+                        init_rect = [int(roi[0]), int(roi[1]), int(roi[2]), int(roi[3])]
+                        if init_rect[2] > 0 and init_rect[3] > 0:
+                            init_rect = clamp_bbox(init_rect, first_frame.shape)
+                            # 销毁窗口以便在终端进行输入
+                            cv2.destroyAllWindows()
+                            cv2.waitKey(1)
+                            class_id = select_class_from_console()
+                            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+
+                        if class_id is not None:
+                            tracker.init(first_frame, init_rect)
+                            tracking_active = True
+                            current_class_id = class_id
+                            class_locked = True  # 自动锁定类别
+                            last_processed_idx = current_idx
+                            last_bbox = init_rect
+                            last_score = 1.0
+                            results[current_idx] = {'bbox': init_rect, 'score': 1.0}
+                            playing = True
+                            print(f'手动框选并初始化跟踪: {CLASS_NAMES_CN[class_id]} (已锁定)\n')
+                        break
+                    elif ord('0') <= key <= ord('4'):  # 0-4 - 选择类别
+                        class_id = key - ord('0')
                         class_locked = True  # 自动锁定类别
-                        last_processed_idx = current_idx
-                        last_bbox = init_rect
-                        last_score = 1.0
-                        results[current_idx] = {'bbox': init_rect, 'score': 1.0}
-                        playing = True
-                        print(f'手动框选并初始化跟踪: {CLASS_NAMES_CN[class_id]} (已锁定)\n')
-                    break
-                elif ord('0') <= key <= ord('4'):  # 0-4 - 选择类别
-                    class_id = key - ord('0')
-                    class_locked = True  # 自动锁定类别
-                    print(f'\n已选择类别: {class_id} - {CLASS_NAMES_CN[class_id]} ({CLASS_NAMES[class_id]})')
-                    print('✓ 类别已自动锁定，后续自动恢复将使用此类别')
-                    print('提示: 按 L 键可解锁类别\n')
-                    sys.stdout.flush()
-                    wait_for_input = False
+                        print(f'\n已选择类别: {class_id} - {CLASS_NAMES_CN[class_id]} ({CLASS_NAMES[class_id]})')
+                        print('✓ 类别已自动锁定，后续自动恢复将使用此类别')
+                        print('提示: 按 L 键可解锁类别\n')
+                        sys.stdout.flush()
+                        wait_for_input = False
 
             if class_id is not None:
                 # 使用选择的类别初始化跟踪
@@ -657,14 +703,27 @@ def process_single_video(video_path, tracker, yolo_model, args, is_first_video=F
                 print(f'已自动初始化跟踪，当前类别: {CLASS_NAMES_CN[class_id]} ({CLASS_NAMES[class_id]}) (已锁定)\n')
             else:
                 print('取消自动检测，请手动框选\n')
-                cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+                if ui_enabled:
+                    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         elif len(detections) > 1:
             print(f'检测到 {len(detections)} 个目标，跳过自动初始化')
+            if headless:
+                print(f'headless模式：首帧检测到多个目标，无法交互，跳过视频: {video_name}\n')
+                cap.release()
+                if ui_enabled:
+                    cv2.destroyAllWindows()
+                return (0, global_class_locked, global_class_id)
             waiting_for_single_target = True
             status_text = f'DETECTED {len(detections)} TARGETS - Waiting for single target'
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         else:
             print('未检测到目标，请手动框选')
+            if headless:
+                print(f'headless模式：首帧未检测到目标且无法手动框选，跳过视频: {video_name}\n')
+                cap.release()
+                if ui_enabled:
+                    cv2.destroyAllWindows()
+                return (0, global_class_locked, global_class_id)
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
             cv2.imshow(window_name, first_frame)
 
@@ -764,20 +823,15 @@ def process_single_video(video_path, tracker, yolo_model, args, is_first_video=F
             else:
                 print(f'  检测到 {len(detections)} 个目标，跳过该视频')
                 cap.release()
-                cv2.destroyAllWindows()
+                if ui_enabled:
+                    cv2.destroyAllWindows()
                 return (0, global_class_locked, global_class_id)
         else:
             print('  错误: YOLO模型未加载，无法自动检测')
             cap.release()
-            cv2.destroyAllWindows()
+            if ui_enabled:
+                cv2.destroyAllWindows()
             return (0, global_class_locked, global_class_id)
-
-    # headless模式：首帧交互完成后立即销毁窗口，后续不再弹出
-    if headless and headless_ui_enabled:
-        cv2.destroyAllWindows()
-        cv2.waitKey(1)
-        headless_ui_enabled = False  # 首帧交互已结束，禁用后续窗口
-        print('headless模式：首帧交互已完成，后续不再显示窗口')
 
     while True:
         if current_idx < cache_start_idx:
@@ -841,7 +895,8 @@ def process_single_video(video_path, tracker, yolo_model, args, is_first_video=F
                                     print(f'\n跳过当前视频: {video_name}')
                                     print(f'已保存 {saved_labels} 个标注\n')
                                     cap.release()
-                                    cv2.destroyAllWindows()
+                                    if ui_enabled:
+                                        cv2.destroyAllWindows()
                                     return (saved_labels, class_locked, current_class_id)
                                 recovery_class_id = console_choice if isinstance(console_choice, int) else None
                                 if recovery_class_id is not None:
@@ -911,7 +966,8 @@ def process_single_video(video_path, tracker, yolo_model, args, is_first_video=F
                             last_score = 1.0
                             results[current_idx] = {'bbox': det_bbox, 'score': 1.0}
                             auto_recovered = True
-                            print(f'  帧 {current_idx}: 置信度低，YOLO自动恢复 ({CLASS_NAMES[recovery_class_id]})')
+                            if not headless:
+                                print(f'  帧 {current_idx}: 置信度低，YOLO自动恢复 ({CLASS_NAMES[recovery_class_id]})')
                             track_failed = False
 
             if track_failed:
@@ -950,7 +1006,8 @@ def process_single_video(video_path, tracker, yolo_model, args, is_first_video=F
                             else:
                                 # 没有当前类别，跳过恢复
                                 skip_frame_save = True
-                                print(f'  帧 {current_idx}: IOU过低 ({iou:.3f})，但无用户选择的类别，跳过该帧')
+                                if not headless:
+                                    print(f'  帧 {current_idx}: IOU过低 ({iou:.3f})，但无用户选择的类别，跳过该帧')
 
                             if recovery_class_id is not None:
                                 tracker.init(frame, det_bbox_clamped)
@@ -959,14 +1016,16 @@ def process_single_video(video_path, tracker, yolo_model, args, is_first_video=F
                                 last_score = 1.0
                                 results[current_idx] = {'bbox': det_bbox_clamped, 'score': 1.0}
                                 auto_recovered = True
-                                print(f'  帧 {current_idx}: IOU过低 ({iou:.3f})，YOLO框自动恢复 ({CLASS_NAMES[recovery_class_id]})')
+                                if not headless:
+                                    print(f'  帧 {current_idx}: IOU过低 ({iou:.3f})，YOLO框自动恢复 ({CLASS_NAMES[recovery_class_id]})')
                     else:
                         # 检测到多个目标，跳过该帧但继续跟踪
                         skip_frame_save = True
                         # 只打印一次，避免刷屏
                         if current_idx - last_multi_target_print_idx >= 30:
-                            print(f'  帧 {current_idx}: 检测到 {len(detections)} 个目标，跳过该帧')
-                            last_multi_target_print_idx = current_idx
+                            if not headless:
+                                print(f'  帧 {current_idx}: 检测到 {len(detections)} 个目标，跳过该帧')
+                                last_multi_target_print_idx = current_idx
 
         # 从结果中获取当前帧信息
         frame_result = results.get(current_idx, None)
@@ -997,7 +1056,7 @@ def process_single_video(video_path, tracker, yolo_model, args, is_first_video=F
 
         # 绘制并显示
         frame_to_show = draw_overlay(frame, last_bbox, last_score, current_class_id, status_text)
-        if (not headless) or headless_ui_enabled:
+        if ui_enabled:
             cv2.imshow(window_name, frame_to_show)
 
         # 自动保存标注
@@ -1009,15 +1068,7 @@ def process_single_video(video_path, tracker, yolo_model, args, is_first_video=F
             if img_name is not None:
                 saved_labels += 1
                 last_save_time = current_time
-                if headless:
-                    print(f'  进度: [{current_idx}/{total_frames}] 保存: {img_name} (时间: {current_time:.2f}s, 类别: {CLASS_NAMES[current_class_id]})')
-                else:
-                    print(f'  已保存: {img_name} (时间: {current_time:.2f}s, 类别: {CLASS_NAMES[current_class_id]})')
-
-        # 打印进度 (headless模式)
-        if headless and tracking_active and current_idx % 30 == 0:
-            progress = (current_idx / total_frames) * 100
-            print(f'  进度: {current_idx}/{total_frames} ({progress:.1f}%) - 置信度: {last_score:.3f}')
+                # 不再打印单视频内的保存进度，避免干扰总体进度显示
 
         # 按键处理
         if headless:
@@ -1100,7 +1151,8 @@ def process_single_video(video_path, tracker, yolo_model, args, is_first_video=F
                 current_idx += 1
 
     cap.release()
-    cv2.destroyAllWindows()
+    if ui_enabled:
+        cv2.destroyAllWindows()
     print(f'完成: {video_name}, 生成 {saved_labels} 个标注')
     return (saved_labels, class_locked, current_class_id)
 
@@ -1154,7 +1206,10 @@ def main():
         print('未找到视频文件')
         return
 
-    print(f'找到 {len(video_files)} 个视频文件')
+    total_videos = len(video_files)  # 视频总数量
+    processed_videos = 0  # 已处理的视频数量
+
+    print(f'找到 {total_videos} 个视频文件')
 
     # 创建输出目录
     os.makedirs(args.output_dir, exist_ok=True)
@@ -1163,8 +1218,23 @@ def main():
     total_labels = 0
     global_class_locked = False  # 全局类别锁定状态
     global_class_id = None  # 全局锁定的类别ID
+    use_tqdm_bar = args.headless and TQDM_AVAILABLE  # 是否在headless模式下使用tqdm进度条
+    progress_bar = None  # tqdm进度条实例
+    bar_width = 30  # 总体进度条宽度（非tqdm降级方案）
+    if use_tqdm_bar:
+        progress_bar = tqdm(
+            total=total_videos,
+            desc='总体进度',
+            unit='video',
+            dynamic_ncols=True,
+            leave=True,
+            file=sys.stdout,
+        )
+        progress_bar.refresh()
+    else:
+        progress_line = render_overall_progress(processed_videos, total_videos, bar_width)  # 初始进度条文本
+        print(progress_line, end='', flush=True)
     for i, video_path in enumerate(video_files, 1):
-        print(f'\n[{i}/{len(video_files)}] 开始处理视频...')
         if global_class_locked:
             print(f'使用全局锁定类别: {CLASS_NAMES_CN[global_class_id]} ({CLASS_NAMES[global_class_id]})')
         is_first_video = (i == 1)  # 是否为第一个视频
@@ -1172,6 +1242,17 @@ def main():
             video_path, tracker, yolo_model, args, is_first_video, global_class_locked, global_class_id
         )
         total_labels += num_labels
+        processed_videos += 1
+        if use_tqdm_bar and progress_bar is not None:
+            progress_bar.update(1)
+        else:
+            progress_line = render_overall_progress(processed_videos, total_videos, bar_width)  # 更新后的进度条文本
+            print(progress_line, end='', flush=True)
+
+    if use_tqdm_bar and progress_bar is not None:
+        progress_bar.close()
+    else:
+        print()  # 进度条结束后换行
 
     print(f'\n全部完成! 总共生成 {total_labels} 个标注')
     print(f'输出目录: {args.output_dir}')
