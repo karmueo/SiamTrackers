@@ -26,11 +26,27 @@ VIDEO_EXTS = {'.mp4', '.avi', '.mov', '.mkv', '.mpeg', '.mpg'}
 
 
 def is_video_file(path):
+    """判断文件是否为视频文件。
+
+    Args:
+        path: 文件路径
+
+    Returns:
+        bool: 如果是视频文件返回True，否则返回False
+    """
     _, ext = os.path.splitext(path)
     return ext.lower() in VIDEO_EXTS
 
 
 def list_videos(root_dir):
+    """递归遍历目录，返回所有视频文件。
+
+    Args:
+        root_dir: 根目录路径
+
+    Yields:
+        str: 视频文件的完整路径
+    """
     for dirpath, _, filenames in os.walk(root_dir):
         for name in filenames:
             full_path = os.path.join(dirpath, name)
@@ -39,6 +55,17 @@ def list_videos(root_dir):
 
 
 def parse_init_rect(rect_str):
+    """解析初始化边界框字符串。
+
+    Args:
+        rect_str: 边界框字符串，格式为 "x,y,w,h"
+
+    Returns:
+        list|None: 解析后的边界框 [x, y, w, h]，如果输入为空则返回None
+
+    Raises:
+        ValueError: 如果格式不正确
+    """
     if not rect_str:
         return None
     parts = rect_str.split(',')
@@ -48,6 +75,15 @@ def parse_init_rect(rect_str):
 
 
 def clamp_bbox(bbox, frame_shape):
+    """裁剪边界框到图像范围内。
+
+    Args:
+        bbox: 边界框 [x, y, w, h]
+        frame_shape: 图像形状 (H, W, C)
+
+    Returns:
+        list: 裁剪后的边界框 [x, y, w, h]
+    """
     x, y, w, h = bbox
     x = max(0, min(x, frame_shape[1] - 1))
     y = max(0, min(y, frame_shape[0] - 1))
@@ -57,6 +93,16 @@ def clamp_bbox(bbox, frame_shape):
 
 
 def crop_and_resize(frame, bbox, roi_size):
+    """裁剪边界框区域并调整到指定尺寸。
+
+    Args:
+        frame: 输入图像
+        bbox: 边界框 [x, y, w, h]
+        roi_size: 输出ROI尺寸（正方形）
+
+    Returns:
+        np.ndarray: 裁剪并调整大小后的图像
+    """
     h, w = frame.shape[:2]
     x, y, bw, bh = bbox
     bw = max(1.0, float(bw))
@@ -88,6 +134,16 @@ def crop_and_resize(frame, bbox, roi_size):
 
 
 def get_output_base(output_root, video_path, video_root):
+    """获取输出基础目录，保持与输入视频相同的相对路径结构。
+
+    Args:
+        output_root: 输出根目录
+        video_path: 视频文件完整路径
+        video_root: 视频根目录
+
+    Returns:
+        str: 输出基础目录路径
+    """
     rel_path = os.path.relpath(video_path, video_root)
     rel_dir = os.path.dirname(rel_path)
     base_dir = os.path.join(output_root, rel_dir)
@@ -96,15 +152,35 @@ def get_output_base(output_root, video_path, video_root):
 
 
 def get_chunk_dir(base_dir, video_path, chunk_idx):
+    """获取视频分块目录路径。
+
+    Args:
+        base_dir: 基础输出目录
+        video_path: 视频文件路径
+        chunk_idx: 分块索引
+
+    Returns:
+        str: 分块目录路径
+    """
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     return os.path.join(base_dir, '{}_{}'.format(video_name, chunk_idx))
 
 
 def ensure_dir(path):
+    """确保目录存在，如不存在则创建。
+
+    Args:
+        path: 目录路径
+    """
     os.makedirs(path, exist_ok=True)
 
 
 def writer_loop(write_queue):
+    """图像写入线程循环函数。
+
+    Args:
+        write_queue: 写入队列，包含 (path, image) 元组的批次
+    """
     while True:
         batch = write_queue.get()
         if batch is None:
@@ -114,6 +190,16 @@ def writer_loop(write_queue):
 
 
 def select_yolo_init(yolo, frame, conf_thres):
+    """使用YOLO检测并选择首个满足置信度要求的目标作为初始化框。
+
+    Args:
+        yolo: YOLO模型实例
+        frame: 输入图像
+        conf_thres: 置信度阈值
+
+    Returns:
+        list|None: 检测到的边界框 [x, y, w, h]，未检测到则返回None
+    """
     results = yolo.predict(frame, conf=conf_thres, verbose=False)
     if not results:
         return None
@@ -130,6 +216,13 @@ def select_yolo_init(yolo, frame, conf_thres):
 
 
 def write_chunk_json(chunk_dir, resolution, tracks):
+    """将分块跟踪结果写入JSON文件。
+
+    Args:
+        chunk_dir: 分块目录路径
+        resolution: 视频分辨率 (width, height)
+        tracks: 跟踪结果列表，每个元素包含 image 和 bbox 信息
+    """
     json_path = '{}.json'.format(chunk_dir)
     payload = {
         'resolution': {
@@ -143,10 +236,24 @@ def write_chunk_json(chunk_dir, resolution, tracks):
 
 
 def safe_print(message, print_lock):
+    """线程安全的打印函数。
+
+    Args:
+        message: 要打印的消息
+        print_lock: 打印锁
+    """
     with print_lock:
         print(message)
 
 def print_progress(current, total, video_path, print_lock):
+    """打印进度条和当前处理视频信息。
+
+    Args:
+        current: 当前处理数量
+        total: 总数量
+        video_path: 当前视频路径
+        print_lock: 打印锁
+    """
     bar_len = 30
     filled = int(round(bar_len * float(current) / float(total)))
     bar = '=' * filled + '-' * (bar_len - filled)
@@ -156,6 +263,15 @@ def print_progress(current, total, video_path, print_lock):
 
 
 def load_tracker(snapshot_path, local_device):
+    """加载NanoTrack跟踪器模型。
+
+    Args:
+        snapshot_path: 模型权重文件路径
+        local_device: 运行设备
+
+    Returns:
+        跟踪器实例
+    """
     if local_device.type == 'cuda':
         torch.cuda.set_device(local_device.index)
     local_model = ModelBuilder()
@@ -164,6 +280,16 @@ def load_tracker(snapshot_path, local_device):
 
 
 def process_video(video_path, args_dict, tracker, yolo_model, write_queue, print_lock):
+    """处理单个视频文件，进行目标跟踪并保存结果。
+
+    Args:
+        video_path: 视频文件路径
+        args_dict: 参数字典
+        tracker: NanoTrack跟踪器实例
+        yolo_model: YOLO检测器实例（可选）
+        write_queue: 异步写入队列
+        print_lock: 打印锁
+    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         safe_print('Failed to open video: {}'.format(video_path), print_lock)
@@ -334,6 +460,20 @@ def process_video(video_path, args_dict, tracker, yolo_model, write_queue, print
 
 def worker_loop(worker_id, args_dict, use_cuda, gpu_count, video_queue, write_queue, print_lock,
                 progress_lock, progress_started, total_videos):
+    """工作进程循环函数，从队列中获取视频任务并处理。
+
+    Args:
+        worker_id: 工作进程ID
+        args_dict: 参数字典
+        use_cuda: 是否使用CUDA
+        gpu_count: GPU数量
+        video_queue: 视频任务队列
+        write_queue: 异步写入队列
+        print_lock: 打印锁
+        progress_lock: 进度锁
+        progress_started: 已开始处理数量（共享变量）
+        total_videos: 视频总数量
+    """
     cfg.merge_from_file(args_dict['config'])
     cfg.CUDA = use_cuda
     torch.set_num_threads(1)
@@ -371,6 +511,15 @@ def worker_loop(worker_id, args_dict, use_cuda, gpu_count, video_queue, write_qu
 
 
 def main():
+    """主函数：批量处理视频，使用NanoTrack进行目标跟踪。
+
+    支持功能：
+    - 递归扫描指定目录下的所有视频文件
+    - 使用YOLO辅助初始化跟踪目标
+    - 多进程并行处理
+    - 异步图像写入
+    - 导出跟踪ROI和标注信息
+    """
     parser = argparse.ArgumentParser(description='batch tracking for videos')
     parser.add_argument('--config', default='./models/config/configv3.yaml', type=str, help='config file')
     parser.add_argument('--snapshot', default='models/pretrained/nanotrackv3.pth', type=str, help='model name')

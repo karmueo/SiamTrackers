@@ -22,12 +22,28 @@ torch.set_num_threads(1)
 
 class MergeModel(nn.Module):
     """合并 backbone 和 head 为单个模型"""
+
     def __init__(self, backbone, head):
+        """初始化合并模型。
+
+        Args:
+            backbone: 特征提取骨干网络
+            head: 分类回归头网络
+        """
         super(MergeModel, self).__init__()
         self.backbone = backbone
         self.head = head
 
     def forward(self, z, x):
+        """前向传播。
+
+        Args:
+            z: 模板图像特征输入
+            x: 搜索区域图像特征输入
+
+        Returns:
+            tuple: (cls, loc) 分类分数和边界框定位偏移
+        """
         zf = self.backbone(z)
         xf = self.backbone(x)
         cls, loc = self.head(zf, xf)
@@ -35,6 +51,12 @@ class MergeModel(nn.Module):
 
 
 def parse_args():
+    """解析命令行参数。
+
+    Returns:
+        argparse.Namespace: 解析后的参数命名空间，包含配置文件路径、
+            快照路径、导出选项、ONNX opset 版本、输入输出保存/加载选项等
+    """
     parser = argparse.ArgumentParser(description='Export NanoTrack v3 to ONNX and eval diff')
     parser.add_argument('--config', type=str, default='./models/config/configv3.yaml', help='config file')
     parser.add_argument('--snapshot', type=str, default='./models/pretrained/nanotrackv3.pth', help='pytorch checkpoint')
@@ -54,12 +76,27 @@ def parse_args():
 
 
 def ensure_dir(path):
+    """确保输出文件的目录存在，如不存在则创建。
+
+    Args:
+        path: 输出文件路径
+    """
     out_dir = os.path.dirname(path)
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir, exist_ok=True)
 
 
 def export_backbone(model, exemplar_size, out_path, opset, static_shapes=False, verbose=True):
+    """导出 backbone 模型到 ONNX 格式。
+
+    Args:
+        model: 模型构建器对象
+        exemplar_size: 输入图像尺寸（正方形）
+        out_path: 输出 ONNX 文件路径
+        opset: ONNX opset 版本
+        static_shapes: 是否使用静态形状（无动态轴），默认 False
+        verbose: 是否打印导出信息，默认 True
+    """
     ensure_dir(out_path)
     dummy = torch.randn(1, 3, exemplar_size, exemplar_size)
     dynamic_axes = None if static_shapes else {'input': {0: 'batch', 2: 'h', 3: 'w'},
@@ -72,6 +109,17 @@ def export_backbone(model, exemplar_size, out_path, opset, static_shapes=False, 
 
 
 def export_head(model, z_feat, x_feat, out_path, opset, static_shapes=False, verbose=True):
+    """导出 head 模型到 ONNX 格式。
+
+    Args:
+        model: 模型构建器对象
+        z_feat: 模板特征（用于确定输入形状）
+        x_feat: 搜索区域特征（用于确定输入形状）
+        out_path: 输出 ONNX 文件路径
+        opset: ONNX opset 版本
+        static_shapes: 是否使用静态形状（无动态轴），默认 False
+        verbose: 是否打印导出信息，默认 True
+    """
     ensure_dir(out_path)
     dynamic_axes = None if static_shapes else {
         'input1': {0: 'batch', 2: 'zh', 3: 'zw'},
@@ -90,7 +138,17 @@ def export_head(model, z_feat, x_feat, out_path, opset, static_shapes=False, ver
 
 
 def export_merge(model, exemplar_size, instance_size, out_path, opset, static_shapes=False, verbose=True):
-    """导出合并的 backbone+head 模型"""
+    """导出合并的 backbone+head 模型到 ONNX 格式。
+
+    Args:
+        model: 模型构建器对象
+        exemplar_size: 模板图像尺寸（正方形）
+        instance_size: 搜索区域图像尺寸（正方形）
+        out_path: 输出 ONNX 文件路径
+        opset: ONNX opset 版本
+        static_shapes: 是否使用静态形状（无动态轴），默认 False
+        verbose: 是否打印导出信息，默认 True
+    """
     ensure_dir(out_path)
     merge_model = MergeModel(model.backbone, model.ban_head)
 
@@ -117,6 +175,15 @@ def export_merge(model, exemplar_size, instance_size, out_path, opset, static_sh
 
 
 def run_ort(path, inputs):
+    """使用 ONNXRuntime 运行模型推理。
+
+    Args:
+        path: ONNX 模型文件路径
+        inputs: 模型输入列表，每个元素为 numpy 数组
+
+    Returns:
+        list: 模型输出列表，每个元素为 numpy 数组
+    """
     import onnxruntime as ort
     sess = ort.InferenceSession(path, providers=['CPUExecutionProvider'])
     feed = {sess.get_inputs()[i].name: inp for i, inp in enumerate(inputs)}
@@ -125,17 +192,44 @@ def run_ort(path, inputs):
 
 
 def diff_metric(a, b):
+    """计算两个数组之间的差异指标。
+
+    Args:
+        a: 第一个数组（numpy 数组）
+        b: 第二个数组（numpy 数组）
+
+    Returns:
+        tuple: (mean_diff, max_diff) 平均差异和最大差异
+    """
     diff = np.abs(a - b)
     return diff.mean(), diff.max()
 
 
 def print_sample(name, arr, max_elems=10):
+    """打印数组的形状、类型和样本值。
+
+    Args:
+        name: 数组名称（用于打印）
+        arr: numpy 数组
+        max_elems: 打印样本元素的最大数量，默认 10
+    """
     flat = arr.flatten()
     preview = flat[:max_elems]
     print('{} shape {}, dtype {}, sample {}'.format(name, arr.shape, arr.dtype, preview))
 
 
 def main():
+    """主函数：导出 NanoTrack 模型到 ONNX 格式并进行精度验证。
+
+    功能流程：
+    1. 解析命令行参数并加载配置
+    2. 加载预训练的 PyTorch 模型
+    3. 生成或加载推理输入数据（模板图像 z 和搜索区域 x）
+    4. 运行 PyTorch 模型推理获取参考输出
+    5. 根据配置导出合并模型或分离的 backbone+head 模型到 ONNX
+    6. 使用 ONNXRuntime 运行推理
+    7. 计算 PyTorch 和 ONNXRuntime 输出之间的差异并验证精度
+    """
     args = parse_args()
     try:
         import onnxruntime  # noqa: F401
