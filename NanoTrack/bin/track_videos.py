@@ -189,25 +189,158 @@ def writer_loop(write_queue):
             cv2.imwrite(path, img)
 
 
-def select_yolo_init(yolo, frame, conf_thres):
-    """使用YOLO检测并选择首个满足置信度要求的目标作为初始化框。
+def parse_imgsz(imgsz):
+    """解析推理尺寸字符串（Google风格中文注释）。
 
     Args:
-        yolo: YOLO模型实例
-        frame: 输入图像
-        conf_thres: 置信度阈值
+        imgsz (str): 推理尺寸字符串，格式为 "640" 或 "352,640" 或 "352x640"。
 
     Returns:
-        list|None: 检测到的边界框 [x, y, w, h]，未检测到则返回None
+        tuple[int, int]: (高, 宽)。
+
+    Raises:
+        ValueError: 当输入格式无效时抛出。
     """
-    results = yolo.predict(frame, conf=conf_thres, verbose=False)
-    if not results:
-        return None
-    boxes = results[0].boxes
-    if boxes is None or len(boxes) == 0:
-        return None
-    confs = boxes.conf.cpu().numpy()
-    xyxy = boxes.xyxy.cpu().numpy()
+    imgsz = imgsz.lower().replace('x', ',')  # 尺寸字符串
+    parts = [p for p in imgsz.split(',') if p.strip()]  # 尺寸片段
+    if len(parts) == 1:
+        size = int(parts[0])  # 方形尺寸
+        return size, size
+    if len(parts) == 2:
+        height = int(parts[0])  # 目标高度
+        width = int(parts[1])  # 目标宽度
+        return height, width
+    raise ValueError('无效的 --yolo-imgsz 参数：{}'.format(imgsz))
+
+
+def letterbox_image(image, new_shape, color=(114, 114, 114)):
+    """等比缩放并填充到目标尺寸（Google风格中文注释）。
+
+    Args:
+        image (np.ndarray): 输入图像（BGR）。
+        new_shape (tuple[int, int]): 目标尺寸 (高, 宽)。
+        color (tuple[int, int, int]): 填充颜色。
+
+    Returns:
+        tuple[np.ndarray, float, tuple[int, int]]: 预处理后的图像、缩放比例、左上角填充值 (pad_x, pad_y)。
+    """
+    height = image.shape[0]  # 原图高度
+    width = image.shape[1]  # 原图宽度
+    target_h, target_w = new_shape  # 目标尺寸
+
+    ratio = min(target_w / width, target_h / height)  # 缩放比例
+    resized_w = int(round(width * ratio))  # 缩放后宽度
+    resized_h = int(round(height * ratio))  # 缩放后高度
+    resized = cv2.resize(image, (resized_w, resized_h), interpolation=cv2.INTER_LINEAR)  # 缩放图像
+
+    pad_w = target_w - resized_w  # 需要填充的宽度
+    pad_h = target_h - resized_h  # 需要填充的高度
+    left = pad_w // 2  # 左侧填充
+    right = pad_w - left  # 右侧填充
+    top = pad_h // 2  # 上侧填充
+    bottom = pad_h - top  # 下侧填充
+
+    padded = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # 填充图像
+    return padded, ratio, (left, top)
+
+
+def scale_boxes_from_letterbox(boxes_xyxy, ratio, pad, original_shape):
+    """将 letterbox 坐标映射回原图（Google风格中文注释）。
+
+    Args:
+        boxes_xyxy (np.ndarray): letterbox 图像中的 xyxy 坐标。
+        ratio (float): 缩放比例。
+        pad (tuple[int, int]): (pad_x, pad_y)。
+        original_shape (tuple[int, int]): 原图尺寸 (高, 宽)。
+
+    Returns:
+        np.ndarray: 映射回原图的 xyxy 坐标。
+    """
+    pad_x, pad_y = pad  # 填充值
+    boxes = boxes_xyxy.copy()  # 坐标副本
+    boxes[:, [0, 2]] -= pad_x
+    boxes[:, [1, 3]] -= pad_y
+    boxes /= ratio
+
+    orig_h, orig_w = original_shape  # 原图尺寸
+    boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(0, orig_w - 1)
+    boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, orig_h - 1)
+    return boxes
+
+
+def scale_boxes_from_resize(boxes_xyxy, original_shape, resized_shape):
+    """将直接缩放后的坐标映射回原图（Google风格中文注释）。
+
+    Args:
+        boxes_xyxy (np.ndarray): 直接缩放图像中的 xyxy 坐标。
+        original_shape (tuple[int, int]): 原图尺寸 (高, 宽)。
+        resized_shape (tuple[int, int]): 缩放后尺寸 (高, 宽)。
+
+    Returns:
+        np.ndarray: 映射回原图的 xyxy 坐标。
+    """
+    orig_h, orig_w = original_shape  # 原图尺寸
+    resized_h, resized_w = resized_shape  # 缩放后尺寸
+    gain_w = orig_w / resized_w  # 宽度缩放回原图的比例
+    gain_h = orig_h / resized_h  # 高度缩放回原图的比例
+
+    boxes = boxes_xyxy.copy()  # 坐标副本
+    boxes[:, [0, 2]] *= gain_w
+    boxes[:, [1, 3]] *= gain_h
+    boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(0, orig_w - 1)
+    boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, orig_h - 1)
+    return boxes
+
+
+def select_yolo_init_yolo26(yolo, frame, conf_thres, preprocess, imgsz):
+    """使用 YOLO26 推理并选择首个满足阈值的目标框（Google风格中文注释）。
+
+    Args:
+        yolo: YOLO 模型实例。
+        frame (np.ndarray): 输入图像（BGR）。
+        conf_thres (float): 置信度阈值。
+        preprocess (str): 预处理方式，"letterbox" 或 "resize"。
+        imgsz (str): 推理尺寸字符串，如 "352,640"。
+
+    Returns:
+        list|None: 检测到的边界框 [x, y, w, h]，未检测到则返回 None。
+    """
+    target_h, target_w = parse_imgsz(imgsz)  # 推理尺寸
+    if preprocess == 'letterbox':
+        input_img, ratio, pad = letterbox_image(frame, (target_h, target_w))  # 等比缩放输入
+        results = yolo.predict(
+            source=input_img,
+            imgsz=(target_h, target_w),
+            conf=conf_thres,
+            verbose=False,
+        )
+        if not results:
+            return None
+        result = results[0]  # 单帧结果
+        boxes_obj = result.boxes  # 检测框对象
+        if boxes_obj is None or len(boxes_obj) == 0:
+            return None
+        confs = boxes_obj.conf.cpu().numpy()  # 置信度
+        xyxy = boxes_obj.xyxy.cpu().numpy()  # 坐标
+        xyxy = scale_boxes_from_letterbox(xyxy, ratio, pad, (frame.shape[0], frame.shape[1]))  # 映射回原图
+    else:
+        resized = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)  # 直接缩放输入
+        results = yolo.predict(
+            source=resized,
+            imgsz=(target_h, target_w),
+            conf=conf_thres,
+            verbose=False,
+        )
+        if not results:
+            return None
+        result = results[0]  # 单帧结果
+        boxes_obj = result.boxes  # 检测框对象
+        if boxes_obj is None or len(boxes_obj) == 0:
+            return None
+        confs = boxes_obj.conf.cpu().numpy()  # 置信度
+        xyxy = boxes_obj.xyxy.cpu().numpy()  # 坐标
+        xyxy = scale_boxes_from_resize(xyxy, (frame.shape[0], frame.shape[1]), (target_h, target_w))  # 映射回原图
+
     for i in range(len(confs)):
         if confs[i] >= conf_thres:
             x1, y1, x2, y2 = xyxy[i]
@@ -327,7 +460,13 @@ def process_video(video_path, args_dict, tracker, yolo_model, write_queue, print
         if not tracking:
             current_init = None
             if yolo_model is not None:
-                current_init = select_yolo_init(yolo_model, frame, args_dict['yolo_conf'])
+                current_init = select_yolo_init_yolo26(
+                    yolo_model,
+                    frame,
+                    args_dict['yolo_conf'],
+                    args_dict['yolo_preprocess'],
+                    args_dict['yolo_imgsz'],
+                )
             elif init_rect is not None:
                 current_init = init_rect
 
@@ -526,8 +665,21 @@ def main():
     parser.add_argument('--video-root', required=True, type=str, help='root directory of videos')
     parser.add_argument('--output-root', default='./results/track_rois', type=str, help='output directory')
     parser.add_argument('--use-yolo', action='store_true', help='use ultralytics YOLO for init')
-    parser.add_argument('--yolo-weights', default='yolov11n.pt', type=str, help='YOLO weights path')
+    parser.add_argument(
+        '--yolo-weights',
+        default='/home/tl/work/yolo/ultralytics/runs/detect/yolo26s_110_rgb_352_640_cls0.6_v2/weights/best.pt',
+        type=str,
+        help='YOLO weights path',
+    )
     parser.add_argument('--yolo-conf', default=0.5, type=float, help='YOLO confidence threshold')
+    parser.add_argument(
+        '--yolo-preprocess',
+        default='letterbox',
+        choices=['letterbox', 'resize'],
+        type=str,
+        help='YOLO preprocess mode',
+    )
+    parser.add_argument('--yolo-imgsz', default='352,640', type=str, help='YOLO inference size H,W')
     parser.add_argument('--track-conf', default=0.3, type=float, help='tracking confidence threshold')
     parser.add_argument('--roi-size', default=64, type=int, help='output ROI size')
     parser.add_argument('--frames-per-folder', default=200, type=int, help='frames saved per folder')

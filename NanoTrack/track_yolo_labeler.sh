@@ -11,10 +11,10 @@ export PYTHONPATH="${PWD}"
 python bin/track_yolo_labeler.py \
     --config "models/config/configv3.yaml" \
     --snapshot "models/pretrained/nanotrackv3.pth" \
-    --input "/home/tl/data_80/data/video/110/RGB/2025-11-all/uav" \
+    --input "/home/tl/data_80/data/video/110/RGB/fz_12/good/bird" \
     --output-dir "./results/yolo_labels" \
     --track-conf "0.92" \
-    --label-interval "8.0" \
+    --label-interval "3" \
     --max-cache "300" \
     --yolo-model "/home/tl/work/yolo/ultralytics/runs/detect/yolo26s_110_rgb_v2/weights/best.pt" \
     --yolo-conf "0.25" \
