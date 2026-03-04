@@ -163,7 +163,7 @@
                 "--track-conf", "0.92",                                    // 跟踪置信度阈值(0-1)，低于此值将暂停提示重新框选
                 "--label-interval", "8.0",                               // 标注生成间隔(秒)，每隔多少秒保存一次标注
                 "--max-cache", "300",                                    // 最大缓存帧数，用于左方向键回退历史帧
-                "--yolo-model", "/home/tl/work/yolo/ultralytics/runs/detect/yolo26s_110_rgb_v2/weights/best.pt",  // YOLO模型路径 (如: yolov8n.pt)，留空则禁用检测
+                "--yolo-model", "/home/tl/work/yolo/ultralytics/runs/detect/yolo26s_110_rgb_352_640_cls0.6_v2/weights/best.pt",  // YOLO模型路径 (如: yolov8n.pt)，留空则禁用检测
                 "--yolo-conf", "0.25",                                   // YOLO检测置信度阈值
                 "--yolo-iou", "0.5",                                    // 检测框与跟踪框IOU阈值，低于此值认为跟踪失败
                 "--yolo-imgsz", "640x352",                              // YOLO推理输入尺寸 (如: 640 或 640x352)
@@ -171,7 +171,7 @@
                 "--auto-detect",                                        // 启用自动检测模式 (第一帧自动检测目标)
                 "--use-first-class",                                    // 使用首个类别模式 (第一个视频首次选择类别后，后续所有视频自动使用该类别)
                 "--headless",                                           // 无显示模式 (只在需要用户交互时显示画面，其他时候只打印进度以提高速度)
-                "--label-seq-len", "3"
+                "--label-seq-len", "3"                                  // 标签序列长度 (为每帧生成标注)
             ],
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",

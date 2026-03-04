@@ -19,9 +19,16 @@ ONNX视频目标跟踪脚本
 - 交互式ROI目标框选
 
 使用示例:
-    # 分离模式
+    # 分离模式（动态形状，共享backbone）
     python bin/track_onnx_video.py --mode separated \\
         --backbone models/onnx/nanotrack_backbone.onnx \\
+        --head models/onnx/nanotrack_head.onnx \\
+        --video test.mp4
+
+    # 分离模式（静态形状，独立backbone）
+    python bin/track_onnx_video.py --mode separated \\
+        --backbone models/onnx/nanotrack_backbone.onnx \\
+        --backbone-search models/onnx/nanotrack_backbone_search.onnx \\
         --head models/onnx/nanotrack_head.onnx \\
         --video test.mp4
 
@@ -271,16 +278,23 @@ class ONNXTracker:
     """
 
     def __init__(self, mode='separated', backbone_path=None, head_path=None,
-                 merged_path=None, use_cuda=False, params=None):
+                 backbone_search_path=None, merged_path=None, use_cuda=False, params=None):
         """初始化ONNX跟踪器。
 
         根据指定的模式加载相应的ONNX模型。分离模式需要backbone和head
         两个模型文件，合并模式只需要一个合并的模型文件。
 
+        静态形状模式下，模板和搜索区域使用独立的backbone模型：
+        - backbone_path: 用于模板（127x127）
+        - backbone_search_path: 用于搜索区域（255x255）
+
+        动态形状模式下，只需一个backbone即可处理不同尺寸输入。
+
         Args:
             mode (str): 模型模式，'separated'或'merged'，默认'separated'。
-            backbone_path (str): 分离模式下backbone ONNX模型路径。
+            backbone_path (str): 分离模式下backbone ONNX模型路径（用于模板）。
             head_path (str): 分离模式下head ONNX模型路径。
+            backbone_search_path (str): 可选，静态形状模式下搜索区域backbone路径。
             merged_path (str): 合并模式下合并ONNX模型路径。
             use_cuda (bool): 是否使用CUDA加速，默认False。
             params (dict): 跟踪参数字典，默认使用DEFAULT_TRACK_PARAMS。
@@ -312,12 +326,21 @@ class ONNXTracker:
             self.backbone_session = self._create_session(backbone_path)
             self.head_session = self._create_session(head_path)
             self.merged_session = None
+            # 静态形状模式：使用独立的搜索区域backbone
+            if backbone_search_path:
+                self.backbone_search_session = self._create_session(backbone_search_path)
+                self._use_static_shapes = True
+            else:
+                self.backbone_search_session = None
+                self._use_static_shapes = False
         else:  # merged
             if not merged_path:
                 raise ValueError('合并模式需要指定merged_path')
             self.backbone_session = None
             self.head_session = None
+            self.backbone_search_session = None
             self.merged_session = self._create_session(merged_path)
+            self._use_static_shapes = False
 
         # 初始化跟踪状态
         self.score_size = self.params['OUTPUT_SIZE']
@@ -366,19 +389,28 @@ class ONNXTracker:
 
         return session
 
-    def _run_backbone(self, image_np):
+    def _run_backbone(self, image_np, is_template=True):
         """运行backbone推理（分离模式）。
 
-        将输入图像通过backbone网络提取特征。
+        将输入图像通过backbone网络提取特征。静态形状模式下，
+        模板和搜索区域使用不同的backbone会话。
 
         Args:
             image_np (np.ndarray): 输入图像，形状为(1, 3, H, W)。
+            is_template (bool): 是否为模板图像，默认True。
+                True表示模板（127x127），False表示搜索区域（255x255）。
 
         Returns:
             np.ndarray: 提取的特征图。
         """
-        input_name = self.backbone_session.get_inputs()[0].name
-        output = self.backbone_session.run(None, {input_name: image_np})
+        # 静态形状模式下，搜索区域使用独立的backbone
+        if not is_template and self._use_static_shapes and self.backbone_search_session is not None:
+            session = self.backbone_search_session
+        else:
+            session = self.backbone_session
+
+        input_name = session.get_inputs()[0].name
+        output = session.run(None, {input_name: image_np})
         return output[0]
 
     def _run_head(self, z_feat, x_feat):
@@ -575,7 +607,8 @@ class ONNXTracker:
         # 根据模式进行推理
         if self.mode == 'separated':
             # 分离模式: 分别运行backbone和head
-            xf = self._run_backbone(x_crop)
+            # 静态形状模式下，搜索区域使用独立的backbone_search_session
+            xf = self._run_backbone(x_crop, is_template=False)
             cls, loc = self._run_head(self.zf, xf)
         else:
             # 合并模式: 一次推理
@@ -654,8 +687,11 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 使用示例:
-  # 分离模式
+  # 分离模式（动态形状，共享backbone）
   python %(prog)s --mode separated --backbone backbone.onnx --head head.onnx --video test.mp4
+
+  # 分离模式（静态形状，独立backbone）
+  python %(prog)s --mode separated --backbone backbone.onnx --backbone-search backbone_search.onnx --head head.onnx --video test.mp4
 
   # 合并模式
   python %(prog)s --mode merged --merged nanotrack_merged.onnx --video test.mp4
@@ -672,7 +708,10 @@ def parse_args():
 
     # 分离模式参数
     parser.add_argument('--backbone', type=str, default='',
-                        help='分离模式: backbone ONNX模型路径')
+                        help='分离模式: backbone ONNX模型路径（用于模板）')
+    parser.add_argument('--backbone-search', type=str, default='',
+                        help='分离模式（可选）: 搜索区域backbone ONNX模型路径。'
+                             '指定此参数启用静态形状模式，使用独立的backbone处理搜索区域')
     parser.add_argument('--head', type=str, default='',
                         help='分离模式: head ONNX模型路径')
 
@@ -721,6 +760,10 @@ def validate_args(args):
             return False, '错误: backbone模型不存在: {}'.format(args.backbone)
         if not os.path.exists(args.head):
             return False, '错误: head模型不存在: {}'.format(args.head)
+        # 验证静态形状模式下的搜索区域backbone
+        if args.backbone_search:
+            if not os.path.exists(args.backbone_search):
+                return False, '错误: backbone-search模型不存在: {}'.format(args.backbone_search)
     else:  # merged
         if not args.merged:
             return False, '合并模式需要指定 --merged 参数'
@@ -802,11 +845,17 @@ def main():
     print('  模式: {}'.format(args.mode))
     if args.mode == 'separated':
         print('  Backbone: {}'.format(args.backbone))
+        if args.backbone_search:
+            print('  Backbone-search: {}'.format(args.backbone_search))
+            print('  形状模式: 静态（独立backbone）')
+        else:
+            print('  形状模式: 动态（共享backbone）')
         print('  Head: {}'.format(args.head))
         tracker = ONNXTracker(
             mode='separated',
             backbone_path=args.backbone,
             head_path=args.head,
+            backbone_search_path=args.backbone_search if args.backbone_search else None,
             use_cuda=args.use_cuda
         )
     else:
@@ -871,6 +920,7 @@ def main():
     # 跟踪参数字典（用于JSON导出）
     tracking_params = {
         'mode': args.mode,
+        'static_shapes': bool(args.backbone_search) if args.mode == 'separated' else False,
         'window_influence': DEFAULT_TRACK_PARAMS['WINDOW_INFLUENCE'],
         'penalty_k': DEFAULT_TRACK_PARAMS['PENALTY_K'],
         'lr': DEFAULT_TRACK_PARAMS['LR']

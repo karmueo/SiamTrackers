@@ -65,7 +65,7 @@ def parse_args():
     parser.add_argument('--output-dir', default='./results/yolo_labels', type=str, help='YOLO数据集输出目录')
     parser.add_argument('--track-conf', default=0.3, type=float, help='跟踪置信度阈值')
     parser.add_argument('--label-interval', default=5.0, type=float, help='标注生成间隔(秒)')
-    parser.add_argument('--label-seq-len', default=1, type=int, help='每次标注保存连续帧数量(仅最后一帧生成标注)')
+    parser.add_argument('--label-seq-len', default=1, type=int, help='每次标注保存连续帧数量(为每帧生成标注)')
     parser.add_argument('--max-cache', default=300, type=int, help='最大缓存帧数(用于左方向键回退)')
     # YOLO检测相关参数
     parser.add_argument('--yolo-model', default='', type=str, help='YOLO模型路径 (如: yolov8n.pt)')
@@ -414,18 +414,16 @@ def draw_overlay(frame, bbox, score, class_id, status_text):
     return output
 
 
-def save_label_sequence(frame_cache, cache_start_idx, current_idx, seq_len, frame, visualized_frame,
-                        bbox, class_id, img_dir, label_dir, visualized_dir, video_name):
-    """保存连续帧图像并生成当前帧的YOLO标注。
+def save_label_sequence(frame_cache, cache_start_idx, current_idx, seq_len, results, class_id,
+                        img_dir, label_dir, visualized_dir, video_name):
+    """保存连续帧图像并生成对应的YOLO标注（序列必须完整）。
 
     Args:
         frame_cache (list): 帧缓存列表。
         cache_start_idx (int): 缓存起始帧索引。
         current_idx (int): 当前帧索引。
         seq_len (int): 连续保存的帧数。
-        frame (np.ndarray): 当前帧原始图像。
-        visualized_frame (np.ndarray): 绘制了标注框的可视化图像。
-        bbox (list): 边界框 [x, y, w, h]。
+        results (dict): 跟踪结果缓存，key为帧索引，value包含bbox/score。
         class_id (int): 类别ID。
         img_dir (str): 原始图像保存目录。
         label_dir (str): 标注保存目录。
@@ -433,36 +431,43 @@ def save_label_sequence(frame_cache, cache_start_idx, current_idx, seq_len, fram
         video_name (str): 视频名称。
 
     Returns:
-        str|None: 保存的当前帧文件名，若缓存不足则返回None。
+        str|None: 保存的当前帧文件名，若缓存不足或序列不完整则返回None。
     """
     start_idx = current_idx - (seq_len - 1)  # 连续帧起始索引
     if start_idx < cache_start_idx:
         return None
 
-    for seq_idx in range(start_idx, current_idx):  # 序列帧索引
+    seq_indices = list(range(start_idx, current_idx + 1))  # 连续帧索引列表
+    for seq_idx in seq_indices:
+        seq_result = results.get(seq_idx, None)  # 序列帧跟踪结果
+        if seq_result is None or seq_result.get('bbox', None) is None:
+            return None
+
+    for seq_idx in seq_indices:
         seq_frame = frame_cache[seq_idx - cache_start_idx]  # 序列帧图像
+        seq_result = results[seq_idx]  # 序列帧跟踪结果
+        seq_bbox = seq_result.get('bbox', None)  # 序列帧边界框
+        seq_score = seq_result.get('score', None)  # 序列帧置信度
+
         seq_img_name = f'{video_name}_{seq_idx:06d}.jpg'  # 序列帧文件名
         seq_img_path = os.path.join(img_dir, seq_img_name)  # 序列帧输出路径
-        if not os.path.exists(seq_img_path):
-            cv2.imwrite(seq_img_path, seq_frame)
+        seq_label_path = os.path.join(label_dir, seq_img_name.replace('.jpg', '.txt'))  # 序列帧标注路径
+        seq_visualized_path = os.path.join(visualized_dir, seq_img_name)  # 序列帧可视化路径
+
+        # 保存序列帧原始图像
+        cv2.imwrite(seq_img_path, seq_frame)
+
+        # 保存可视化图像（带标注框）
+        seq_visualized_frame = draw_overlay(seq_frame, seq_bbox, seq_score, class_id, '')  # 序列帧可视化图像
+        cv2.imwrite(seq_visualized_path, seq_visualized_frame)
+
+        # 保存YOLO格式标注
+        h, w = seq_frame.shape[:2]  # 序列帧图像尺寸
+        yolo_bbox = bbox_to_yolo(seq_bbox, w, h)  # 序列帧YOLO格式框
+        with open(seq_label_path, 'w') as f:
+            f.write(f'{class_id} {yolo_bbox[0]:.6f} {yolo_bbox[1]:.6f} {yolo_bbox[2]:.6f} {yolo_bbox[3]:.6f}\n')
 
     img_name = f'{video_name}_{current_idx:06d}.jpg'  # 当前帧文件名
-    img_path = os.path.join(img_dir, img_name)  # 当前帧输出路径
-    label_path = os.path.join(label_dir, img_name.replace('.jpg', '.txt'))  # 标注输出路径
-    visualized_path = os.path.join(visualized_dir, img_name)  # 可视化输出路径
-
-    # 保存当前帧原始图像
-    cv2.imwrite(img_path, frame)
-
-    # 保存可视化图像（带标注框）
-    cv2.imwrite(visualized_path, visualized_frame)
-
-    # 保存YOLO格式标注
-    h, w = frame.shape[:2]  # 当前图像尺寸
-    yolo_bbox = bbox_to_yolo(bbox, w, h)  # YOLO格式框
-    with open(label_path, 'w') as f:
-        f.write(f'{class_id} {yolo_bbox[0]:.6f} {yolo_bbox[1]:.6f} {yolo_bbox[2]:.6f} {yolo_bbox[3]:.6f}\n')
-
     return img_name
 
 
@@ -1062,8 +1067,8 @@ def process_single_video(video_path, tracker, yolo_model, args, is_first_video=F
         # 自动保存标注
         if tracking_active and last_bbox is not None and (current_time - last_save_time >= args.label_interval) and not skip_frame_save:
             img_name = save_label_sequence(
-                frame_cache, cache_start_idx, current_idx, label_seq_len, frame, frame_to_show,
-                last_bbox, current_class_id, img_dir, label_dir, visualized_dir, video_name
+                frame_cache, cache_start_idx, current_idx, label_seq_len, results, current_class_id,
+                img_dir, label_dir, visualized_dir, video_name
             )
             if img_name is not None:
                 saved_labels += 1
